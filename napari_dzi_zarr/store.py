@@ -1,4 +1,6 @@
 from fsspec import get_mapper
+from zarr.meta import encode_array_metadata, encode_group_metadata
+from zarr.storage import array_meta_key, group_meta_key, attrs_key
 from zarr.util import json_dumps
 import numpy as np
 import imageio
@@ -9,26 +11,7 @@ from urllib.parse import urlparse, urlunparse
 import xml.etree.ElementTree as ET
 from collections import namedtuple
 
-ZARR_FORMAT = 2
-ZARR_META_KEY = ".zattrs"
-ZARR_ARRAY_META_KEY = ".zarray"
-ZARR_GROUP_META_KEY = ".zgroup"
-ZARR_GROUP_META = {"zarr_format": ZARR_FORMAT}
-
 DZIMetadata = namedtuple("DZIMetadata", "tilesize overlap format height width")
-
-
-def create_array_meta(shape, chunks):
-    return {
-        "chunks": chunks,
-        "compressor": None,  # chunk is decoded with store, so no zarr compression
-        "dtype": "|u1",  # RGB/A images only
-        "fill_value": 0.0,
-        "filters": None,
-        "order": "C",
-        "shape": shape,
-        "zarr_format": ZARR_FORMAT,
-    }
 
 
 def create_root_attrs(levels):
@@ -152,8 +135,7 @@ class DZIStore:
         return tile.shape[2]
 
     def _init_zarr_metadata(self) -> dict:
-        d = dict()
-
+        store = dict()
         # DZI generates all levels of the pyramid
         # Level 0 is 1x1 image, so we need to calculate the max level (highest resolution)
         # and trim the pyramid to just the tiled levels.
@@ -163,8 +145,8 @@ class DZIStore:
         nlevels = max_level - np.ceil(np.log2(self._dzi_meta.tilesize)).astype(int)
         levels = list(reversed(range(max_level + 1)))[:nlevels]
 
-        d[ZARR_GROUP_META_KEY] = json_dumps(ZARR_GROUP_META)
-        d[ZARR_META_KEY] = json_dumps(create_root_attrs(levels))
+        store[group_meta_key] = encode_group_metadata()
+        store[attrs_key] = json_dumps(create_root_attrs(levels))
 
         # TODO: Might be a better way to determine RGB/RGBA-ness for pyramid
         csize = self._get_csize(max_level)
@@ -173,13 +155,19 @@ class DZIStore:
                 self._dzi_meta.width // 2 ** level,
                 self._dzi_meta.height // 2 ** level,
             )
-            array_meta = create_array_meta(
-                shape=(ysize, xsize, csize),
+            meta = dict(
                 chunks=(self._dzi_meta.tilesize, self._dzi_meta.tilesize, csize),
+                shape=(ysize, xsize, csize),
+                compressor=None,  # chunk is decoded with store, so no zarr compression
+                dtype=np.dtype(np.uint8),  # RGB/A images only
+                fill_value=0,
+                filters=None,
+                order="C",
             )
-            d[f"{max_level - level}/{ZARR_ARRAY_META_KEY}"] = json_dumps(array_meta)
+            key_prefix = str(max_level - level) + "/"
+            store[key_prefix + array_meta_key] = encode_array_metadata(meta)
 
-        return d
+        return store
 
     def keys(self):
         return self._metadata_store.keys()
